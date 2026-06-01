@@ -247,10 +247,15 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    await q.answer()
     uid = q.from_user.id
     d = q.data
     usr = get_user(uid)
+
+    # Отвечаем немедленно чтобы убрать часики у кнопки
+    try:
+        await q.answer()
+    except Exception:
+        pass
 
     if d.startswith("agent:"):
         aid = d.split(":")[1]
@@ -264,38 +269,59 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"{'📚 История: ' + str(hist//2) + ' сообщ.' if hist else '🆕 Новый диалог'}\n\n"
             "Напишите запрос или выберите пример:"
         )
-        await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=agent_kb(aid))
+        try:
+            await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=agent_kb(aid))
+        except Exception:
+            await ctx.bot.send_message(uid, text, parse_mode=ParseMode.MARKDOWN, reply_markup=agent_kb(aid))
 
     elif d.startswith("ex:"):
         _, aid, example = d.split(":", 2)
         usr["agent"] = aid
         set_user(uid, usr)
-        await q.edit_message_text(f"⏳ Обрабатываю...", parse_mode=ParseMode.MARKDOWN)
+        try:
+            await q.edit_message_text(f"⏳ {AGENTS[aid]['emoji']} Обрабатываю...", parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            pass
         reply = await ask_agent(aid, uid, example)
         text = f"{AGENTS[aid]['emoji']} *{AGENTS[aid]['name']}*\n\n{reply}"
         if len(text) > 4096:
             text = text[:4090] + "..."
-        await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=agent_kb(aid))
+        try:
+            await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=agent_kb(aid))
+        except Exception:
+            await ctx.bot.send_message(uid, text, parse_mode=ParseMode.MARKDOWN, reply_markup=agent_kb(aid))
 
     elif d.startswith("clear:"):
         aid = d.split(":")[1]
         usr["history"][aid] = []
         set_user(uid, usr)
-        await q.edit_message_text(f"🗑 История {AGENTS[aid]['name']} очищена", reply_markup=agent_kb(aid))
+        try:
+            await q.edit_message_text(f"🗑 История {AGENTS[aid]['name']} очищена", reply_markup=agent_kb(aid))
+        except Exception:
+            await ctx.bot.send_message(uid, f"🗑 История очищена")
 
     elif d == "clear_all":
         usr["history"] = {}
         set_user(uid, usr)
-        await q.edit_message_text("🗑 Вся история очищена", reply_markup=settings_kb(uid))
+        try:
+            await q.edit_message_text("🗑 Вся история очищена", reply_markup=settings_kb(uid))
+        except Exception:
+            await ctx.bot.send_message(uid, "🗑 Вся история очищена")
 
     elif d == "settings":
-        await q.edit_message_text("⚙️ *Настройки*", parse_mode=ParseMode.MARKDOWN, reply_markup=settings_kb(uid))
+        try:
+            await q.edit_message_text("⚙️ *Настройки*", parse_mode=ParseMode.MARKDOWN, reply_markup=settings_kb(uid))
+        except Exception:
+            await ctx.bot.send_message(uid, "⚙️ Настройки", reply_markup=settings_kb(uid))
 
     elif d == "toggle":
         usr["schedule"] = not usr.get("schedule", True)
         set_user(uid, usr)
         s = "включён ✅" if usr["schedule"] else "выключен ❌"
-        await q.edit_message_text(f"☀️ Автобрифинг {s}", reply_markup=settings_kb(uid))
+        try:
+            await q.edit_message_text(f"☀️ Автобрифинг {s}", reply_markup=settings_kb(uid))
+        except Exception:
+            await ctx.bot.send_message(uid, f"☀️ Автобрифинг {s}")
 
     elif d == "memory":
         mem = usr.get("memory", {})
@@ -314,16 +340,23 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 text += f"• *{k}:* {v}\n"
         else:
             text += "_Пусто_"
-        await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Меню", callback_data="back")]]))
+        try:
+            await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Меню", callback_data="back")]]))
+        except Exception:
+            await ctx.bot.send_message(uid, text, parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Меню", callback_data="back")]]))
 
     elif d == "back":
         usr["agent"] = None
         set_user(uid, usr)
-        await q.edit_message_text(
-            "🏛 *AI ANUAR Assistant*\n\nВыберите агента:",
-            parse_mode=ParseMode.MARKDOWN, reply_markup=main_kb()
-        )
+        try:
+            await q.edit_message_text(
+                "🏛 *AI ANUAR Assistant*\n\nВыберите агента:",
+                parse_mode=ParseMode.MARKDOWN, reply_markup=main_kb()
+            )
+        except Exception:
+            await ctx.bot.send_message(uid, "🏛 Выберите агента:", reply_markup=main_kb())
 
 async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
