@@ -1,11 +1,12 @@
 """
 AI ANUAR Assistant — Telegram Bot
-5 автономных ИИ-агентов на Google Gemini (бесплатно)
+6 автономных ИИ-агентов на Google Gemini (бесплатно)
 """
 
 import os
 import json
 import logging
+import httpx
 from datetime import datetime
 from pathlib import Path
 
@@ -16,7 +17,6 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-import httpx
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 logger = logging.getLogger("LawOffice")
@@ -24,6 +24,8 @@ logger = logging.getLogger("LawOffice")
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={GEMINI_API_KEY}"
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+SHEETS_WEBHOOK = os.environ.get("SHEETS_WEBHOOK", "")
 
 AGENTS = {
     "lexpost": {
@@ -55,6 +57,24 @@ AGENTS = {
         "desc": "Дайджест новостей и план дня",
         "system": "Ты — LexBrief, утренний помощник Anuar Aitmurzin. Создавай брифинг: ТОП-3 новости права → Идея поста LinkedIn → Правовой инсайт дня → 1 приоритет на сегодня.",
         "examples": ["Утренний брифинг на сегодня", "Дайджест конкурентного права", "EU Competition за неделю"]
+    },
+    "lextask": {
+        "name": "LexTask", "emoji": "📌", "role": "Менеджер задач",
+        "desc": "Голос или текст → задача в Google Sheets",
+        "system": """Ты — LexTask, менеджер задач для Anuar Aitmurzin. 
+Твоя задача: извлечь из текста поручения структурированную задачу.
+
+Ответь ТОЛЬКО в формате JSON (без markdown, без пояснений):
+{
+  "task": "чёткое описание задачи",
+  "assignee": "имя исполнителя или 'Не указан'",
+  "deadline": "срок в формате ДД.ММ.ГГГГ или 'Не указан'",
+  "status": "Новая",
+  "clarification": "вопрос если чего-то не хватает, иначе null"
+}
+
+Если исполнитель или срок не указаны явно — ставь 'Не указан' и задай уточняющий вопрос в поле clarification.""",
+        "examples": ["Иванову подготовить ответ на запрос АЗРК до пятницы", "Алие проверить договор с Kaspi до 15 июня", "Напомни созвониться с клиентом завтра"]
     },
 }
 
@@ -120,14 +140,46 @@ async def ask_agent(agent_id, uid, message):
     set_user(uid, usr)
     return reply
 
-# Keyboards — callback_data макс 64 байта!
+async def transcribe_voice(file_path: str) -> str:
+    """Распознавание голоса через Groq Whisper"""
+    if not GROQ_API_KEY:
+        return "⚠️ GROQ_API_KEY не настроен"
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            with open(file_path, "rb") as f:
+                r = await client.post(
+                    "https://api.groq.com/openai/v1/audio/transcriptions",
+                    headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                    files={"file": ("voice.ogg", f, "audio/ogg")},
+                    data={"model": "whisper-large-v3", "language": "ru"}
+                )
+            data = r.json()
+            return data.get("text", "⚠️ Не удалось распознать")
+    except Exception as e:
+        return f"⚠️ Ошибка распознавания: {e}"
+
+async def save_to_sheets(task_data: dict) -> bool:
+    """Отправка задачи в Google Sheets через Apps Script"""
+    if not SHEETS_WEBHOOK:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(SHEETS_WEBHOOK, json=task_data)
+            result = r.json()
+            return result.get("status") == "ok"
+    except Exception as e:
+        logger.error(f"Sheets error: {e}")
+        return False
+
+# Keyboards
 def main_kb():
     rows = [
         [InlineKeyboardButton("✍️ LexPost", callback_data="a:lexpost"),
          InlineKeyboardButton("📡 LexMonitor", callback_data="a:lexmonitor")],
         [InlineKeyboardButton("🎯 LexStrategy", callback_data="a:lexstrategy"),
          InlineKeyboardButton("📋 LexDocs", callback_data="a:lexdocs")],
-        [InlineKeyboardButton("☀️ LexBrief", callback_data="a:lexbrief")],
+        [InlineKeyboardButton("☀️ LexBrief", callback_data="a:lexbrief"),
+         InlineKeyboardButton("📌 LexTask", callback_data="a:lextask")],
         [InlineKeyboardButton("🧠 Память", callback_data="memory"),
          InlineKeyboardButton("⚙️ Настройки", callback_data="settings")],
     ]
@@ -160,7 +212,8 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "📡 *LexMonitor* — анализ законодательства\n"
             "🎯 *LexStrategy* — стратегия практики\n"
             "📋 *LexDocs* — шаблоны документов\n"
-            "☀️ *LexBrief* — утренний дайджест\n\n"
+            "☀️ *LexBrief* — утренний дайджест\n"
+            "📌 *LexTask* — голос/текст → задача в таблице\n\n"
             "☀️ Автобрифинг каждый день в *08:00*")
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=main_kb())
 
@@ -178,7 +231,13 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         usr["agent"] = aid
         set_user(uid, usr)
         ag = AGENTS[aid]
-        text = f"{ag['emoji']} *{ag['name']}* — {ag['role']}\n\n{ag['desc']}\n\nНапишите запрос или выберите пример:"
+        if aid == "lextask":
+            text = (f"{ag['emoji']} *{ag['name']}* — {ag['role']}\n\n"
+                    f"{ag['desc']}\n\n"
+                    "🎤 Отправьте *голосовое сообщение* или напишите поручение текстом.\n\n"
+                    "Пример: _«Алие проверить договор с Kaspi до 15 июня»_")
+        else:
+            text = f"{ag['emoji']} *{ag['name']}* — {ag['role']}\n\n{ag['desc']}\n\nНапишите запрос или выберите пример:"
         try: await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=agent_kb(aid))
         except Exception as e:
             logger.error(f"edit error: {e}")
@@ -192,11 +251,14 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         set_user(uid, usr)
         try: await q.edit_message_text(f"⏳ Обрабатываю...\n_{example}_", parse_mode=ParseMode.MARKDOWN)
         except: pass
-        reply = await ask_agent(aid, uid, example)
-        text = f"{AGENTS[aid]['emoji']} *{AGENTS[aid]['name']}*\n\n{reply}"
-        if len(text) > 4096: text = text[:4090] + "..."
-        try: await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=agent_kb(aid))
-        except: await ctx.bot.send_message(uid, text, parse_mode=ParseMode.MARKDOWN, reply_markup=agent_kb(aid))
+        if aid == "lextask":
+            await process_lextask(ctx.bot, uid, example, q)
+        else:
+            reply = await ask_agent(aid, uid, example)
+            text = f"{AGENTS[aid]['emoji']} *{AGENTS[aid]['name']}*\n\n{reply}"
+            if len(text) > 4096: text = text[:4090] + "..."
+            try: await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=agent_kb(aid))
+            except: await ctx.bot.send_message(uid, text, parse_mode=ParseMode.MARKDOWN, reply_markup=agent_kb(aid))
 
     elif d.startswith("c:"):
         aid = d[2:]
@@ -237,6 +299,73 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try: await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=main_kb())
         except: await ctx.bot.send_message(uid, text, parse_mode=ParseMode.MARKDOWN, reply_markup=main_kb())
 
+async def process_lextask(bot, uid, text, q=None):
+    """Обработка поручения через LexTask"""
+    reply_raw = await ask_agent("lextask", uid, text)
+    try:
+        # Очищаем от markdown если есть
+        clean = reply_raw.strip().strip("```json").strip("```").strip()
+        task_data = json.loads(clean)
+    except Exception:
+        msg = f"📌 *LexTask*\n\n⚠️ Не удалось разобрать поручение. Попробуйте переформулировать.\n\n_{reply_raw[:300]}_"
+        await bot.send_message(uid, msg, parse_mode=ParseMode.MARKDOWN, reply_markup=agent_kb("lextask"))
+        return
+
+    clarification = task_data.get("clarification")
+
+    if clarification:
+        msg = (f"📌 *LexTask*\n\n"
+               f"Понял поручение, но нужно уточнить:\n\n"
+               f"❓ *{clarification}*\n\n"
+               f"Что уже извлёк:\n"
+               f"• Задача: {task_data.get('task','—')}\n"
+               f"• Исполнитель: {task_data.get('assignee','—')}\n"
+               f"• Срок: {task_data.get('deadline','—')}")
+        await bot.send_message(uid, msg, parse_mode=ParseMode.MARKDOWN, reply_markup=agent_kb("lextask"))
+    else:
+        task_data["date"] = datetime.now().strftime("%d.%m.%Y")
+        task_data["source"] = "Telegram"
+        saved = await save_to_sheets(task_data)
+        sheets_status = "✅ Сохранено в таблицу" if saved else "⚠️ Таблица не настроена"
+        msg = (f"📌 *LexTask — задача создана*\n\n"
+               f"📝 *Задача:* {task_data.get('task','—')}\n"
+               f"👤 *Исполнитель:* {task_data.get('assignee','—')}\n"
+               f"📅 *Срок:* {task_data.get('deadline','—')}\n"
+               f"📊 {sheets_status}")
+        await bot.send_message(uid, msg, parse_mode=ParseMode.MARKDOWN, reply_markup=agent_kb("lextask"))
+
+async def on_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Обработка голосовых сообщений"""
+    uid = update.effective_user.id
+    usr = get_user(uid)
+    aid = usr.get("agent")
+
+    if aid != "lextask":
+        await update.message.reply_text(
+            "🎤 Голосовые сообщения поддерживает только *LexTask*.\n\nПерейдите в 📌 LexTask и отправьте голосовое.",
+            parse_mode=ParseMode.MARKDOWN, reply_markup=main_kb())
+        return
+
+    await ctx.bot.send_chat_action(update.effective_chat.id, "typing")
+    status_msg = await update.message.reply_text("🎤 Распознаю речь...")
+
+    voice = update.message.voice
+    file = await ctx.bot.get_file(voice.file_id)
+    file_path = f"/tmp/voice_{uid}.ogg"
+    await file.download_to_drive(file_path)
+
+    transcribed = await transcribe_voice(file_path)
+
+    try: os.remove(file_path)
+    except: pass
+
+    if transcribed.startswith("⚠️"):
+        await status_msg.edit_text(transcribed)
+        return
+
+    await status_msg.edit_text(f"🎤 Распознано: _{transcribed}_\n\n⏳ Создаю задачу...", parse_mode=ParseMode.MARKDOWN)
+    await process_lextask(ctx.bot, uid, transcribed)
+
 async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     usr = get_user(uid)
@@ -246,18 +375,21 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Выберите агента:", reply_markup=main_kb())
         return
     await ctx.bot.send_chat_action(update.effective_chat.id, "typing")
-    reply = await ask_agent(aid, uid, text)
-    ag = AGENTS[aid]
-    header = f"{ag['emoji']} *{ag['name']}*\n\n"
-    full = header + reply
-    if len(full) <= 4096:
-        await update.message.reply_text(full, parse_mode=ParseMode.MARKDOWN, reply_markup=agent_kb(aid))
+    if aid == "lextask":
+        await process_lextask(ctx.bot, uid, text)
     else:
-        chunks = [reply[i:i+3800] for i in range(0, len(reply), 3800)]
-        for i, chunk in enumerate(chunks):
-            kb = agent_kb(aid) if i == len(chunks)-1 else None
-            h = header if i == 0 else f"{ag['emoji']} ({i+1}/{len(chunks)})\n\n"
-            await update.message.reply_text(h + chunk, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+        reply = await ask_agent(aid, uid, text)
+        ag = AGENTS[aid]
+        header = f"{ag['emoji']} *{ag['name']}*\n\n"
+        full = header + reply
+        if len(full) <= 4096:
+            await update.message.reply_text(full, parse_mode=ParseMode.MARKDOWN, reply_markup=agent_kb(aid))
+        else:
+            chunks = [reply[i:i+3800] for i in range(0, len(reply), 3800)]
+            for i, chunk in enumerate(chunks):
+                kb = agent_kb(aid) if i == len(chunks)-1 else None
+                h = header if i == 0 else f"{ag['emoji']} ({i+1}/{len(chunks)})\n\n"
+                await update.message.reply_text(h + chunk, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
 
 async def cmd_brief(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -291,7 +423,7 @@ async def cmd_mem(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📖 *Команды*\n\n/start — меню\n/brief — брифинг\n/post тема — пост\n/mem ключ: значение — память\n/help — справка",
+        "📖 *Команды*\n\n/start — меню\n/brief — брифинг\n/post тема — пост\n/mem ключ: значение — память\n/help — справка\n\n📌 *LexTask*: отправь голосовое или текст поручения",
         parse_mode=ParseMode.MARKDOWN, reply_markup=main_kb())
 
 async def daily_brief(app):
@@ -313,6 +445,7 @@ def main():
     app.add_handler(CommandHandler("mem", cmd_mem))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CallbackQueryHandler(on_button))
+    app.add_handler(MessageHandler(filters.VOICE, on_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
     scheduler = AsyncIOScheduler(timezone="Asia/Almaty")
     scheduler.add_job(daily_brief, "cron", hour=8, minute=0, args=[app])
