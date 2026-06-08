@@ -23,7 +23,7 @@ logger = logging.getLogger("LawOffice")
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={GEMINI_API_KEY}"
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 SHEETS_WEBHOOK = os.environ.get("SHEETS_WEBHOOK", "")
 
@@ -163,7 +163,7 @@ async def save_to_sheets(task_data: dict) -> bool:
     if not SHEETS_WEBHOOK:
         return False
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
             r = await client.post(SHEETS_WEBHOOK, json=task_data)
             result = r.json()
             return result.get("status") == "ok"
