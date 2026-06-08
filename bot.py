@@ -115,10 +115,12 @@ async def fetch_rss(source: dict) -> list:
     """Парсинг RSS ленты, возвращает список заголовков"""
     try:
         async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-            r = await client.get(source["url"], headers={"User-Agent": "Mozilla/5.0"})
+            r = await client.get(source["url"], headers={
+                "User-Agent": "Mozilla/5.0 (compatible; NewsBot/1.0)",
+                "Accept": "application/rss+xml, application/xml, text/xml, */*"
+            })
             root = ET.fromstring(r.text)
             items = []
-            # Поддержка RSS 2.0 и Atom
             for item in root.findall(".//item")[:5]:
                 title = item.findtext("title", "").strip()
                 if title:
@@ -132,14 +134,47 @@ async def fetch_rss(source: dict) -> list:
         logger.warning(f"RSS error {source['name']}: {e}")
         return []
 
+async def fetch_google_news(query: str, label: str) -> list:
+    """Резервный источник — Google News RSS"""
+    try:
+        url = f"https://news.google.com/rss/search?q={query}&hl=ru&gl=KZ&ceid=KZ:ru"
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            r = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            root = ET.fromstring(r.text)
+            items = []
+            for item in root.findall(".//item")[:3]:
+                title = item.findtext("title", "").strip()
+                if title:
+                    items.append(f"[{label}] {title}")
+            return items
+    except Exception as e:
+        logger.warning(f"Google News error {label}: {e}")
+        return []
+
 async def fetch_all_news() -> str:
-    """Получение новостей из всех источников"""
+    """Получение новостей из всех источников с резервным Google News"""
     all_headlines = []
     for source in NEWS_SOURCES:
         headlines = await fetch_rss(source)
         all_headlines.extend(headlines)
+
+    # Если меньше 5 новостей — добавляем Google News
+    if len(all_headlines) < 5:
+        logger.info("Основные RSS недоступны, используем Google News")
+        gn_queries = [
+            ("АЗРК антимонопольный Казахстан", "АЗРК"),
+            ("конкуренция антимонополь Казахстан", "Zakon.kz"),
+            ("EU DMA Digital Markets Act 2026", "EU Competition"),
+            ("antitrust competition FTC 2026", "FTC"),
+            ("competition policy international antitrust", "CPI"),
+        ]
+        import asyncio
+        results = await asyncio.gather(*[fetch_google_news(q, l) for q, l in gn_queries])
+        for r in results:
+            all_headlines.extend(r)
+
     if not all_headlines:
-        return "Новости временно недоступны."
+        return "Новости временно недоступны — попробуйте позже."
     return "\n".join(all_headlines[:20])
 
 async def ask_gemini(system, history, user_msg):
@@ -153,17 +188,29 @@ async def ask_gemini(system, history, user_msg):
         "contents": contents,
         "generationConfig": {"maxOutputTokens": 1500, "temperature": 0.7}
     }
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.post(GEMINI_URL, json=payload)
-            data = r.json()
-            if "candidates" in data:
-                return data["candidates"][0]["content"]["parts"][0]["text"]
-            elif "error" in data:
-                return f"⚠️ Ошибка: {data['error'].get('message','')}"
-            return "⚠️ Нет ответа"
-    except Exception as e:
-        return f"⚠️ Ошибка: {e}"
+    # Retry до 3 раз при перегрузке
+    import asyncio
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.post(GEMINI_URL, json=payload)
+                data = r.json()
+                if "candidates" in data:
+                    return data["candidates"][0]["content"]["parts"][0]["text"]
+                elif "error" in data:
+                    msg = data['error'].get('message', '')
+                    if "high demand" in msg or "overloaded" in msg:
+                        if attempt < 2:
+                            await asyncio.sleep(5)
+                            continue
+                    return f"⚠️ Ошибка: {msg}"
+                return "⚠️ Нет ответа"
+        except Exception as e:
+            if attempt < 2:
+                await asyncio.sleep(3)
+                continue
+            return f"⚠️ Ошибка: {e}"
+    return "⚠️ Gemini временно перегружен. Попробуйте через несколько минут."
 
 async def ask_agent(agent_id, uid, message):
     agent = AGENTS[agent_id]
