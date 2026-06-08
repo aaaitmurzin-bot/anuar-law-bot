@@ -23,7 +23,7 @@ logger = logging.getLogger("LawOffice")
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={GEMINI_API_KEY}"
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 SHEETS_WEBHOOK = os.environ.get("SHEETS_WEBHOOK", "")
 
